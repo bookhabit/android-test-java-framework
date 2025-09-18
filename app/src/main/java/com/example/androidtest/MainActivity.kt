@@ -72,12 +72,15 @@ fun StepCounterApp(
     val coroutineScope = rememberCoroutineScope()
     
     // 상태 변수들
-    var todaySteps by remember { mutableStateOf(0L) }          // 오늘 총 걸음수 (DB + 실시간)
+    var todaySteps by remember { mutableStateOf(0L) }          // DB에 저장된 오늘 걸음수
     var liveSteps by remember { mutableStateOf(0L) }           // 실시간 걸음수 증가분
     var currentSensorValue by remember { mutableStateOf(0L) }   // 현재 센서 값
     var baselineSteps by remember { mutableStateOf(-1L) }      // 앱 시작시 기준점
     var monthlySteps by remember { mutableStateOf(0L) }        // 이번 달 총 걸음수
     var recentData by remember { mutableStateOf<List<DailyStepData>>(emptyList()) }
+    
+    // UI에 표시할 총 걸음수 (DB 저장값 + 실시간 증가분)
+    val displaySteps = todaySteps + liveSteps
     
     // 날짜 포맷터
     val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
@@ -93,9 +96,8 @@ fun StepCounterApp(
             Log.d("StepCounter", "✅ 권한 있음 - 데이터 로드 시작")
             
             // DB에서 오늘 걸음수 로드
-            val savedTodaySteps = repository.getTodaySteps()
-            todaySteps = savedTodaySteps
-            Log.d("StepCounter", "📊 DB에서 로드된 오늘 걸음수: $savedTodaySteps")
+            todaySteps = repository.getTodaySteps()
+            Log.d("StepCounter", "📊 DB에서 로드된 오늘 걸음수: $todaySteps")
             
             // 이번 달 걸음수 로드
             monthlySteps = repository.getCurrentMonthSteps()
@@ -122,6 +124,7 @@ fun StepCounterApp(
                     if (baselineSteps == -1L) {
                         // 기준점 = 현재 센서값 - DB에 저장된 오늘 걸음수
                         baselineSteps = currentStepCount - todaySteps
+                        liveSteps = 0L // 실시간 증가분 초기화
                         Log.d("StepCounter", "🎯 기준점 설정: $baselineSteps (센서: $currentStepCount - 저장된 걸음수: $todaySteps)")
                         return
                     }
@@ -130,24 +133,31 @@ fun StepCounterApp(
                     if (currentStepCount < baselineSteps) {
                         Log.d("StepCounter", "🔄 재부팅 감지 - 기준점 재설정")
                         baselineSteps = currentStepCount - todaySteps
+                        liveSteps = 0L // 실시간 증가분 초기화
                         return
                     }
                     
-                    // 실시간 걸음수 계산
-                    val calculatedTotalSteps = currentStepCount - baselineSteps
+                    // 실시간 걸음수 증가분 계산 (단순하게!)
+                    val newLiveSteps = currentStepCount - baselineSteps - todaySteps
                     
-                    if (calculatedTotalSteps >= 0 && calculatedTotalSteps != todaySteps) {
-                        val previousTodaySteps = todaySteps
-                        todaySteps = calculatedTotalSteps
-                        liveSteps = calculatedTotalSteps - previousTodaySteps
+                    Log.d("StepCounter", "🔢 실시간 증가분: (센서=$currentStepCount - 기준점=$baselineSteps - 저장된=$todaySteps) = $newLiveSteps")
+                    Log.d("StepCounter", "📊 화면 표시: $todaySteps + $newLiveSteps = ${todaySteps + newLiveSteps}")
+                    
+                    if (newLiveSteps >= 0 && newLiveSteps != liveSteps) {
+                        liveSteps = newLiveSteps
                         
-                        Log.d("StepCounter", "🚶 걸음수 업데이트: $todaySteps (증가: +$liveSteps)")
-                        
-                        // DB에 저장
-                        coroutineScope.launch {
-                            repository.saveTodaySteps(todaySteps)
-                            // 월별 걸음수도 업데이트
-                            monthlySteps = repository.getCurrentMonthSteps()
+                        // DB에 저장 (5걸음마다)
+                        if (liveSteps > 0 && liveSteps % 5 == 0L) {
+                            coroutineScope.launch {
+                                val totalStepsToSave = todaySteps + liveSteps
+                                repository.saveTodaySteps(totalStepsToSave)
+                                todaySteps = totalStepsToSave
+                                liveSteps = 0L // 저장 후 실시간 증가분 초기화
+                                Log.d("StepCounter", "💾 DB 저장 완료: $totalStepsToSave")
+                                
+                                // 월별 걸음수도 업데이트
+                                monthlySteps = repository.getCurrentMonthSteps()
+                            }
                         }
                     }
                 }
@@ -204,7 +214,7 @@ fun StepCounterApp(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "$todaySteps",
+                    text = "$displaySteps",
                     fontSize = 36.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
@@ -278,9 +288,13 @@ fun StepCounterApp(
                 onClick = {
                     coroutineScope.launch {
                         Log.d("StepCounter", "🔄 수동 저장 버튼 클릭")
-                        repository.saveTodaySteps(todaySteps)
+                        val totalStepsToSave = todaySteps + liveSteps
+                        repository.saveTodaySteps(totalStepsToSave)
+                        todaySteps = totalStepsToSave
+                        liveSteps = 0L
                         monthlySteps = repository.getCurrentMonthSteps()
                         recentData = repository.getRecentSteps(7)
+                        Log.d("StepCounter", "💾 수동 저장 완료: $totalStepsToSave")
                     }
                 },
                 modifier = Modifier.weight(1f)
@@ -293,6 +307,7 @@ fun StepCounterApp(
                     coroutineScope.launch {
                         Log.d("StepCounter", "🔄 데이터 새로고침")
                         todaySteps = repository.getTodaySteps()
+                        liveSteps = 0L
                         monthlySteps = repository.getCurrentMonthSteps()
                         recentData = repository.getRecentSteps(7)
                     }
@@ -366,9 +381,11 @@ fun StepCounterApp(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("날짜: $todayDateString", fontSize = 10.sp)
+                Text("저장된 걸음수: $todaySteps", fontSize = 10.sp)
+                Text("실시간 증가: +$liveSteps", fontSize = 10.sp)
+                Text("화면 표시: $displaySteps", fontSize = 10.sp)
                 Text("기준점: $baselineSteps", fontSize = 10.sp)
                 Text("센서값: $currentSensorValue", fontSize = 10.sp)
-                Text("실시간 증가: +$liveSteps", fontSize = 10.sp)
             }
         }
     }
