@@ -1,7 +1,6 @@
 package com.example.androidtest
 
-import android.app.ActivityManager
-import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,62 +16,46 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val packageManager = packageManager
 
         setContent {
             MaterialTheme {
-                ActivityManagerScreen(activityManager)
+                InstalledAppsScreen(packageManager)
             }
         }
     }
 }
 
 @Composable
-fun ActivityManagerScreen(activityManager: ActivityManager) {
-    var runningProcesses by remember { mutableStateOf(listOf<ActivityManager.RunningAppProcessInfo>()) }
-    var recentTasks by remember { mutableStateOf(listOf<ActivityManager.RecentTaskInfo>()) }
-    var memoryInfoText by remember { mutableStateOf("") }
+fun InstalledAppsScreen(packageManager: PackageManager) {
+    data class AppInfo(val name: String, val version: String)
+
+    var appList by remember { mutableStateOf(listOf<AppInfo>()) }
 
     LaunchedEffect(Unit) {
-        // 현재 실행 중인 앱 프로세스
-        runningProcesses = activityManager.runningAppProcesses ?: emptyList()
-
-        // 최근 태스크 (최신 5개)
-        recentTasks = try {
-            @Suppress("DEPRECATION")
-            activityManager.getRecentTasks(5, ActivityManager.RECENT_IGNORE_UNAVAILABLE) ?: emptyList()
-        } catch (e: SecurityException) {
-            emptyList()
+        val packages = packageManager.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+        val appsInfo = packages.map { pkg ->
+            val appName = pkg.applicationInfo?.loadLabel(packageManager).toString()
+            val appVersion = pkg.versionName ?: "Unknown"
+            // val permissions = pkg.requestedPermissions?.joinToString(", ") ?: "No Permissions"
+            AppInfo(name = appName, version = appVersion)
         }
-
-        // 메모리 상태
-        val memoryInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memoryInfo)
-        memoryInfoText = "Available Memory: ${memoryInfo.availMem / (1024 * 1024)} MB\n" +
-                "Low Memory: ${memoryInfo.lowMemory}"
+        appList = appsInfo
     }
 
     Column(modifier = Modifier.padding(16.dp)) {
-        Text("💻 Running Processes", style = MaterialTheme.typography.titleMedium)
+        Text("📦 Installed Apps", style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(8.dp))
-        LazyColumn(modifier = Modifier.height(150.dp)) {
-            items(runningProcesses) { process ->
-                Text("Process: ${process.processName}\n PID: ${process.pid}\n Importance: ${process.importance}")
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(appList) { app ->
+                Row(modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)) {
+                    Text(app.name, modifier = Modifier.weight(1f))
+                    Text(app.version, modifier = Modifier.weight(0.5f))
+                }
+                Divider()
             }
         }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("📝 Recent Tasks", style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-        LazyColumn(modifier = Modifier.height(150.dp)) {
-            items(recentTasks) { task ->
-                Text("Package: ${task.baseIntent?.component?.packageName}")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("📊 Memory Info", style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(memoryInfoText)
     }
 }
