@@ -15,6 +15,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,6 +33,14 @@ import com.example.androidtest.data.repository.StepCounterRepository
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+
+// 기간별 조회 결과 데이터 클래스
+data class PeriodResult(
+    val startDate: String,
+    val endDate: String,
+    val totalSteps: Long,
+    val dailyData: List<DailyStepData>
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -61,6 +73,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StepCounterApp(
     checkPermission: () -> Boolean,
@@ -78,6 +91,17 @@ fun StepCounterApp(
     var baselineSteps by remember { mutableStateOf(-1L) }      // 앱 시작시 기준점
     var monthlySteps by remember { mutableStateOf(0L) }        // 이번 달 총 걸음수
     var recentData by remember { mutableStateOf<List<DailyStepData>>(emptyList()) }
+    
+    // DatePicker 관련 상태
+    var showStartDatePicker by remember { mutableStateOf(false) }
+    var showEndDatePicker by remember { mutableStateOf(false) }
+    var showResultDialog by remember { mutableStateOf(false) }
+    var selectedStartDate by remember { mutableStateOf<Long?>(null) }
+    var selectedEndDate by remember { mutableStateOf<Long?>(null) }
+    var periodResult by remember { mutableStateOf<PeriodResult?>(null) }
+    
+    val startDatePickerState = rememberDatePickerState()
+    val endDatePickerState = rememberDatePickerState()
     
     // UI에 표시할 총 걸음수 (DB 저장값 + 실시간 증가분)
     val displaySteps = todaySteps + liveSteps
@@ -347,6 +371,111 @@ fun StepCounterApp(
             }
         }
         
+        // 기간별 조회 섹션
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "📅 기간별 걸음수 조회",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                
+                // 날짜 선택 버튼들
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { showStartDatePicker = true },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = selectedStartDate?.let { 
+                                SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date(it))
+                            } ?: "시작일"
+                        )
+                    }
+                    
+                    Text(
+                        text = "~",
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    
+                    Button(
+                        onClick = { showEndDatePicker = true },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = selectedEndDate?.let { 
+                                SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date(it))
+                            } ?: "종료일"
+                        )
+                    }
+                }
+                
+                // 조회 버튼
+                Button(
+                    onClick = {
+                        if (selectedStartDate != null && selectedEndDate != null) {
+                            coroutineScope.launch {
+                                val startDateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(selectedStartDate!!))
+                                val endDateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(selectedEndDate!!))
+                                
+                                Log.d("StepCounter", "📊 기간별 조회 시작: $startDateStr ~ $endDateStr")
+                                
+                                // 기간별 데이터 조회
+                                val dailyData = repository.getDailyStepsInRange(startDateStr, endDateStr)
+                                val totalSteps = repository.getTotalStepsInRange(startDateStr, endDateStr)
+                                
+                                // 결과 저장
+                                periodResult = PeriodResult(
+                                    startDate = startDateStr,
+                                    endDate = endDateStr,
+                                    totalSteps = totalSteps,
+                                    dailyData = dailyData
+                                )
+                                
+                                // 콘솔 로그 출력
+                                Log.d("StepCounter", "📊 =========================")
+                                Log.d("StepCounter", "📊 기간별 걸음수 조회 결과")
+                                Log.d("StepCounter", "📊 기간: $startDateStr ~ $endDateStr")
+                                Log.d("StepCounter", "📊 총 걸음수: $totalSteps")
+                                Log.d("StepCounter", "📊 일별 데이터:")
+                                dailyData.forEach { data ->
+                                    Log.d("StepCounter", "📊   ${data.date}: ${data.steps} 걸음")
+                                }
+                                Log.d("StepCounter", "📊 =========================")
+                                
+                                // 알림창 표시
+                                showResultDialog = true
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = selectedStartDate != null && selectedEndDate != null
+                ) {
+                    Text("기간별 걸음수 조회")
+                }
+                
+                // 선택된 기간 표시
+                if (selectedStartDate != null && selectedEndDate != null) {
+                    val startStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(selectedStartDate!!))
+                    val endStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(selectedEndDate!!))
+                    Text(
+                        text = "선택된 기간: $startStr ~ $endStr",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        
         // 최근 데이터 표시
         if (recentData.isNotEmpty()) {
             Text(
@@ -406,5 +535,92 @@ fun StepCounterApp(
                 Text("센서값: $currentSensorValue", fontSize = 10.sp)
             }
         }
+    }
+    
+    // 시작일 DatePicker
+    if (showStartDatePicker) {
+        DatePickerDialog(
+            onDismissRequest = { showStartDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedStartDate = startDatePickerState.selectedDateMillis
+                        showStartDatePicker = false
+                    }
+                ) {
+                    Text("확인")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showStartDatePicker = false }
+                ) {
+                    Text("취소")
+                }
+            }
+        ) {
+            DatePicker(state = startDatePickerState)
+        }
+    }
+    
+    // 종료일 DatePicker
+    if (showEndDatePicker) {
+        DatePickerDialog(
+            onDismissRequest = { showEndDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedEndDate = endDatePickerState.selectedDateMillis
+                        showEndDatePicker = false
+                    }
+                ) {
+                    Text("확인")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showEndDatePicker = false }
+                ) {
+                    Text("취소")
+                }
+            }
+        ) {
+            DatePicker(state = endDatePickerState)
+        }
+    }
+    
+    // 결과 알림창
+    if (showResultDialog && periodResult != null) {
+        AlertDialog(
+            onDismissRequest = { showResultDialog = false },
+            title = {
+                Text("📊 기간별 걸음수 결과")
+            },
+            text = {
+                Column {
+                    Text("기간: ${periodResult!!.startDate} ~ ${periodResult!!.endDate}")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "총 걸음수: ${periodResult!!.totalSteps} 걸음",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "평균: ${periodResult!!.totalSteps / periodResult!!.dailyData.size} 걸음/일",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showResultDialog = false }
+                ) {
+                    Text("확인")
+                }
+            }
+        )
     }
 }
