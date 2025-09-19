@@ -18,35 +18,69 @@ class StepCounterRepository(context: Context) {
     private val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     
     /**
-     * 오늘 걸음수를 DB에 저장
+     * 오늘 날짜의 데이터 초기화 또는 업데이트
+     * @param currentSensorSteps 현재 센서에서 읽은 걸음수
      */
-    suspend fun saveTodaySteps(steps: Long) {
+    suspend fun initializeTodayData(currentSensorSteps: Long): Long {
         val today = getTodayDateString()
         val existingData = dailyStepsDao.getStepsByDate(today)
         
-        if (existingData != null) {
-            // 현재 걸음수가 저장된 값보다 클 때만 업데이트
-            if (steps > existingData.steps) {
-                dailyStepsDao.updateStepsByDate(today, steps)
-                Log.d("StepRepository", "💾 오늘 걸음수 DB 업데이트: $steps")
-            }
-        } else {
-            // 새로운 데이터 삽입
+        if (existingData == null) {
+            // 새로운 날 - 데이터 생성
             val newData = DailyStepsEntity(
                 date = today,
-                steps = steps,
+                todaySteps = 0L,
+                sensorSteps = currentSensorSteps,
                 timestamp = System.currentTimeMillis()
             )
             dailyStepsDao.insertOrUpdateSteps(newData)
-            Log.d("StepRepository", "💾 오늘 걸음수 DB 저장: $steps")
+            Log.d("StepRepository", "🆕 새로운 날 데이터 생성: date=$today, sensorSteps=$currentSensorSteps")
+            return 0L
+        } else {
+            // 기존 날짜 - 백그라운드 걸음수 계산
+            val backgroundSteps = currentSensorSteps - existingData.sensorSteps
+            val newTodaySteps = existingData.todaySteps + backgroundSteps
+            
+            if (backgroundSteps > 0) {
+                Log.d("StepRepository", "🚶 백그라운드 걸음 감지: +$backgroundSteps (센서: $currentSensorSteps - 저장된: ${existingData.sensorSteps})")
+                
+                // 백그라운드 걸음수 반영
+                dailyStepsDao.updateStepsAndSensorValue(today, newTodaySteps, currentSensorSteps)
+                return newTodaySteps
+            } else if (backgroundSteps < 0) {
+                // 재부팅 감지 - 센서값 업데이트만
+                Log.d("StepRepository", "🔄 재부팅 감지 - 센서값 업데이트: $currentSensorSteps")
+                dailyStepsDao.updateStepsAndSensorValue(today, existingData.todaySteps, currentSensorSteps)
+                return existingData.todaySteps
+            } else {
+                // 변화 없음
+                return existingData.todaySteps
+            }
         }
     }
     
     /**
-     * 특정 날짜의 걸음수 조회
+     * 오늘 걸음수를 DB에 저장
      */
-    suspend fun getStepsByDate(date: String): Long {
-        return dailyStepsDao.getStepsByDate(date)?.steps ?: 0L
+    suspend fun saveTodaySteps(todaySteps: Long, currentSensorSteps: Long = 0L) {
+        val today = getTodayDateString()
+        val existingData = dailyStepsDao.getStepsByDate(today)
+        
+        if (existingData != null) {
+            if (todaySteps > existingData.todaySteps) {
+                dailyStepsDao.updateStepsAndSensorValue(today, todaySteps, currentSensorSteps)
+                Log.d("StepRepository", "💾 오늘 걸음수 DB 업데이트: $todaySteps (센서: $currentSensorSteps)")
+            }
+        } else {
+            val newData = DailyStepsEntity(
+                date = today,
+                todaySteps = todaySteps,
+                sensorSteps = currentSensorSteps,
+                timestamp = System.currentTimeMillis()
+            )
+            dailyStepsDao.insertOrUpdateSteps(newData)
+            Log.d("StepRepository", "💾 오늘 걸음수 DB 저장: $todaySteps (센서: $currentSensorSteps)")
+        }
     }
     
     /**
@@ -54,7 +88,22 @@ class StepCounterRepository(context: Context) {
      */
     suspend fun getTodaySteps(): Long {
         val today = getTodayDateString()
-        return getStepsByDate(today)
+        return dailyStepsDao.getStepsByDate(today)?.todaySteps ?: 0L
+    }
+    
+    /**
+     * 오늘 센서 걸음수 조회
+     */
+    suspend fun getTodaySensorSteps(): Long {
+        val today = getTodayDateString()
+        return dailyStepsDao.getStepsByDate(today)?.sensorSteps ?: 0L
+    }
+    
+    /**
+     * 특정 날짜의 걸음수 조회
+     */
+    suspend fun getStepsByDate(date: String): Long {
+        return dailyStepsDao.getStepsByDate(date)?.todaySteps ?: 0L
     }
     
     /**
@@ -83,7 +132,7 @@ class StepCounterRepository(context: Context) {
         
         while (calendar.time <= endCalendar.time) {
             val dateString = sdf.format(calendar.time)
-            val steps = resultMap[dateString]?.steps ?: 0L
+            val steps = resultMap[dateString]?.todaySteps ?: 0L
             
             result.add(DailyStepData(
                 date = dateString,
@@ -128,7 +177,7 @@ class StepCounterRepository(context: Context) {
         return recentData.map { entity ->
             DailyStepData(
                 date = entity.date,
-                steps = entity.steps
+                steps = entity.todaySteps
             )
         }
     }
@@ -141,7 +190,7 @@ class StepCounterRepository(context: Context) {
         return allData.map { entity ->
             DailyStepData(
                 date = entity.date,
-                steps = entity.steps
+                steps = entity.todaySteps
             )
         }
     }
@@ -160,6 +209,20 @@ class StepCounterRepository(context: Context) {
     suspend fun deleteAllSteps() {
         dailyStepsDao.deleteAllSteps()
         Log.d("StepRepository", "🗑️ 모든 걸음수 데이터 삭제")
+    }
+    
+    /**
+     * 날짜 변경 감지 및 처리
+     */
+    suspend fun handleDateChange(): Boolean {
+        val today = getTodayDateString()
+        val existingData = dailyStepsDao.getStepsByDate(today)
+        
+        if (existingData == null) {
+            Log.d("StepRepository", "🌅 새로운 날 감지: $today")
+            return true
+        }
+        return false
     }
     
     /**

@@ -23,7 +23,7 @@ abstract class StepCounterDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     StepCounterDatabase::class.java,
-                    "step_counter_database"
+                    "step_counter_database_v2" // 새로운 데이터베이스 이름
                 ).build()
                 INSTANCE = instance
                 instance
