@@ -141,16 +141,14 @@ fun StepCounterApp(
     stopService: () -> Unit
 ) {
     val context = LocalContext.current
-    val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     val repository = remember { StepCounterRepository(context) }
     val coroutineScope = rememberCoroutineScope()
+    
+    // StepCounterManager 싱글톤 인스턴스
+    val stepCounterManager = remember { StepCounterManager.getInstance(context, coroutineScope) }
 
     // 상태 변수들
-    var todaySteps by remember { mutableStateOf(0L) }          // DB에 저장된 오늘 걸음수
-    var liveSteps by remember { mutableStateOf(0L) }           // 실시간 걸음수 증가분
-    var currentSensorValue by remember { mutableStateOf(0L) }   // 현재 센서 값
-    var baselineSteps by remember { mutableStateOf(-1L) }      // 앱 시작시 기준점
-    var monthlySteps by remember { mutableStateOf(0L) }        // 이번 달 총 걸음수
+    var stepData by remember { mutableStateOf(StepCounterManager.StepData()) }
     var recentData by remember { mutableStateOf<List<DailyStepData>>(emptyList()) }
     
     // DatePicker 관련 상태
@@ -165,11 +163,32 @@ fun StepCounterApp(
     val endDatePickerState = rememberDatePickerState()
     
     // UI에 표시할 총 걸음수 (DB 저장값 + 실시간 증가분)
-    val displaySteps = todaySteps + liveSteps
+    val displaySteps = stepData.todaySteps + stepData.liveSteps
     
     // 날짜 포맷터
     val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
     val todayDateString = remember { dateFormatter.format(Date()) }
+
+    // StepCounterManager 콜백 설정
+    LaunchedEffect(Unit) {
+        stepCounterManager.setCallback(object : StepCounterManager.StepCounterCallback {
+            override fun onStepsUpdated(updatedStepData: StepCounterManager.StepData) {
+                stepData = updatedStepData
+            }
+            
+            override fun onStepsSaved(totalSteps: Long) {
+                Log.d("StepCounter", "💾 걸음수 저장됨: $totalSteps")
+            }
+            
+            override fun onNewDayDetected() {
+                Log.d("StepCounter", "🌅 새로운 날 감지됨")
+            }
+            
+            override fun onRebootDetected() {
+                Log.d("StepCounter", "🔄 재부팅 감지됨")
+            }
+        })
+    }
 
     // 앱 시작시 초기화
     LaunchedEffect(Unit) {
@@ -192,15 +211,7 @@ fun StepCounterApp(
         } else {
             Log.d("StepCounter", "✅ 모든 권한 있음 - 데이터 로드 시작")
             
-            // DB에서 오늘 걸음수 로드
-            todaySteps = repository.getTodaySteps()
-            Log.d("StepCounter", "📊 DB에서 로드된 오늘 걸음수: $todaySteps")
-            
-            // 이번 달 걸음수 로드
-            monthlySteps = repository.getCurrentMonthSteps()
-            Log.d("StepCounter", "📊 이번 달 총 걸음수: $monthlySteps")
-            
-            // 최근 7일 데이터 로드
+            // StepCounterManager는 서비스에서 초기화되므로 여기서는 데이터만 로드
             recentData = repository.getRecentSteps(7)
             Log.d("StepCounter", "📊 최근 7일 데이터 로드: ${recentData.size}건")
             
@@ -215,100 +226,17 @@ fun StepCounterApp(
         if (checkPermission() && checkBodySensorsPermission() && checkNotificationPermission()) {
             Log.d("StepCounter", "🚀 모든 권한 승인됨 - Foreground Service 시작")
             startService()
+            
+            // 서비스 시작 후 현재 걸음수 데이터 가져오기
+            stepData = stepCounterManager.getStepData()
         }
     }
 
-    // 센서 리스너 설정
-    DisposableEffect(Unit) {
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                event ?: return
-                if (event.sensor.type == Sensor.TYPE_STEP_COUNTER && checkPermission()) {
-                    val currentSensorSteps = event.values[0].toLong()
-                    currentSensorValue = currentSensorSteps
-                    
-                    Log.d("StepCounter", "👣 센서 데이터: $currentSensorSteps")
-                    
-                    // 첫 센서 데이터 수신시 백그라운드 걸음수 처리
-                    if (baselineSteps == -1L) {
-                        coroutineScope.launch {
-                            // 날짜 변경 체크 및 백그라운드 걸음수 처리
-                            val isNewDay = repository.handleDateChange()
-                            if (isNewDay) {
-                                Log.d("StepCounter", "🌅 새로운 날 시작")
-                            }
-                            
-                            // 오늘 데이터 초기화 (백그라운드 걸음수 포함)
-                            todaySteps = repository.initializeTodayData(currentSensorSteps)
-                            baselineSteps = currentSensorSteps
-                            liveSteps = 0L
-                            
-                            Log.d("StepCounter", "🎯 초기화 완료: todaySteps=$todaySteps, baselineSteps=$baselineSteps")
-                            
-                            // 월별 걸음수 업데이트
-                            monthlySteps = repository.getCurrentMonthSteps()
-                        }
-                        return
-                    }
-                    
-                    // 재부팅 감지 (센서값이 기준점보다 작아짐)
-                    if (currentSensorSteps < baselineSteps) {
-                        Log.d("StepCounter", "🔄 재부팅 감지")
-                        coroutineScope.launch {
-                            todaySteps = repository.initializeTodayData(currentSensorSteps)
-                            baselineSteps = currentSensorSteps
-                            liveSteps = 0L
-                            Log.d("StepCounter", "🔄 재부팅 후 초기화: todaySteps=$todaySteps, baselineSteps=$baselineSteps")
-                        }
-                        return
-                    }
-                    
-                    // 실시간 걸음수 계산: 현재 센서값 - 기준점
-                    val newLiveSteps = currentSensorSteps - baselineSteps
-                    
-                    Log.d("StepCounter", "🔢 실시간 계산: $currentSensorSteps - $baselineSteps = $newLiveSteps")
-                    Log.d("StepCounter", "📊 화면 표시: $todaySteps + $newLiveSteps = ${todaySteps + newLiveSteps}")
-                    
-                    if (newLiveSteps >= 0 && newLiveSteps != liveSteps) {
-                        liveSteps = newLiveSteps
-                        
-                        // DB에 저장 (10걸음마다)
-                        if (liveSteps > 0 && liveSteps % 10 == 0L) {
-                    coroutineScope.launch {
-                                val totalStepsToSave = todaySteps + liveSteps
-                                repository.saveTodaySteps(totalStepsToSave, currentSensorSteps)
-                                todaySteps = totalStepsToSave
-                                liveSteps = 0L
-                                baselineSteps = currentSensorSteps // 새로운 기준점 설정
-                                Log.d("StepCounter", "💾 DB 저장 완료: $totalStepsToSave, 새 기준점: $baselineSteps")
-                                
-                                // 월별 걸음수도 업데이트
-                                monthlySteps = repository.getCurrentMonthSteps()
-                            }
-                        }
-                    }
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-                Log.d("StepCounter", "🎯 센서 정확도: $accuracy")
-            }
-        }
-
-        // 센서 등록
-        if (checkPermission()) {
-            val stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-            if (stepSensor != null) {
-                Log.d("StepCounter", "🔄 걸음 센서 등록")
-                sensorManager.registerListener(listener, stepSensor, SensorManager.SENSOR_DELAY_UI)
-            } else {
-                Log.e("StepCounter", "❌ 걸음 센서 없음")
-            }
-        }
-
-        onDispose {
-            Log.d("StepCounter", "🔄 센서 리스너 해제")
-            sensorManager.unregisterListener(listener)
+    // 주기적으로 걸음수 데이터 업데이트 (서비스에서 측정된 데이터 반영)
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000) // 1초마다 업데이트
+            stepData = stepCounterManager.getStepData()
         }
     }
 
@@ -346,9 +274,9 @@ fun StepCounterApp(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                if (liveSteps > 0) {
+                if (stepData.liveSteps > 0) {
                     Text(
-                        text = "+$liveSteps (실시간)",
+                        text = "+${stepData.liveSteps} (실시간)",
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -376,7 +304,7 @@ fun StepCounterApp(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "$monthlySteps",
+                        text = "${stepData.monthlySteps}",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -398,7 +326,7 @@ fun StepCounterApp(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "$currentSensorValue",
+                        text = "${stepData.currentSensorValue}",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -455,13 +383,8 @@ fun StepCounterApp(
                 onClick = {
                     coroutineScope.launch {
                         Log.d("StepCounter", "🔄 수동 저장 버튼 클릭")
-                        val totalStepsToSave = todaySteps + liveSteps
-                        repository.saveTodaySteps(totalStepsToSave, currentSensorValue)
-                        todaySteps = totalStepsToSave
-                        liveSteps = 0L
-                        monthlySteps = repository.getCurrentMonthSteps()
+                        stepCounterManager.saveSteps()
                         recentData = repository.getRecentSteps(7)
-                        Log.d("StepCounter", "💾 수동 저장 완료: $totalStepsToSave")
                     }
                 },
                 modifier = Modifier.weight(1f)
@@ -473,9 +396,7 @@ fun StepCounterApp(
                 onClick = {
                     coroutineScope.launch {
                         Log.d("StepCounter", "🔄 데이터 새로고침")
-                        todaySteps = repository.getTodaySteps()
-                        liveSteps = 0L
-                        monthlySteps = repository.getCurrentMonthSteps()
+                        stepCounterManager.refreshData()
                         recentData = repository.getRecentSteps(7)
                     }
                 },
@@ -487,8 +408,7 @@ fun StepCounterApp(
             Button(
                 onClick = {
                     Log.d("StepCounter", "🔄 초기화")
-                    baselineSteps = -1L
-                    liveSteps = 0L
+                    stepCounterManager.reset()
                 },
                 modifier = Modifier.weight(1f)
             ) {
@@ -653,11 +573,11 @@ fun StepCounterApp(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("날짜: $todayDateString", fontSize = 10.sp)
-                Text("저장된 걸음수: $todaySteps", fontSize = 10.sp)
-                Text("실시간 증가: +$liveSteps", fontSize = 10.sp)
+                Text("저장된 걸음수: ${stepData.todaySteps}", fontSize = 10.sp)
+                Text("실시간 증가: +${stepData.liveSteps}", fontSize = 10.sp)
                 Text("화면 표시: $displaySteps", fontSize = 10.sp)
-                Text("기준점: $baselineSteps", fontSize = 10.sp)
-                Text("센서값: $currentSensorValue", fontSize = 10.sp)
+                Text("기준점: ${stepData.baselineSteps}", fontSize = 10.sp)
+                Text("센서값: ${stepData.currentSensorValue}", fontSize = 10.sp)
             }
         }
     }
