@@ -6,6 +6,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -48,6 +49,16 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
             Log.d("StepCounter", "🔐 권한 요청 결과: $isGranted")
         }
+    
+    private val requestBodySensorsPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
+            Log.d("StepCounter", "🫀 BODY_SENSORS 권한 요청 결과: $isGranted")
+        }
+    
+    private val requestNotificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
+            Log.d("StepCounter", "🔔 알림 권한 요청 결과: $isGranted")
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,7 +66,13 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 StepCounterApp(
                     checkPermission = { checkPermission() },
-                    requestPermission = { requestPermission() }
+                    requestPermission = { requestPermission() },
+                    checkBodySensorsPermission = { checkBodySensorsPermission() },
+                    requestBodySensorsPermission = { requestBodySensorsPermission() },
+                    checkNotificationPermission = { checkNotificationPermission() },
+                    requestNotificationPermission = { requestNotificationPermission() },
+                    startService = { startStepCounterService() },
+                    stopService = { stopStepCounterService() }
                 )
             }
         }
@@ -71,13 +88,57 @@ class MainActivity : ComponentActivity() {
     private fun requestPermission() {
         requestPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
     }
+    
+    private fun checkBodySensorsPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.BODY_SENSORS
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+    
+    private fun requestBodySensorsPermission() {
+        requestBodySensorsPermissionLauncher.launch(Manifest.permission.BODY_SENSORS)
+    }
+    
+    private fun checkNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // Android 13 미만에서는 알림 권한이 필요 없음
+        }
+    }
+    
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    
+    private fun startStepCounterService() {
+        Log.d("StepCounter", "🚀 Foreground Service 시작")
+        StepCounterService.startService(this)
+    }
+    
+    private fun stopStepCounterService() {
+        Log.d("StepCounter", "🛑 Foreground Service 중지")
+        StepCounterService.stopService(this)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StepCounterApp(
     checkPermission: () -> Boolean,
-    requestPermission: () -> Unit
+    requestPermission: () -> Unit,
+    checkBodySensorsPermission: () -> Boolean,
+    requestBodySensorsPermission: () -> Unit,
+    checkNotificationPermission: () -> Boolean,
+    requestNotificationPermission: () -> Unit,
+    startService: () -> Unit,
+    stopService: () -> Unit
 ) {
     val context = LocalContext.current
     val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -113,11 +174,23 @@ fun StepCounterApp(
     // 앱 시작시 초기화
     LaunchedEffect(Unit) {
         Log.d("StepCounter", "📱 앱 시작 - 권한 체크 및 데이터 로드")
-        if (!checkPermission()) {
-            Log.w("StepCounter", "❌ 권한이 없음 - 권한 요청")
+        
+        // 만보기 앱에 필요한 권한 체크
+        val hasActivityRecognition = checkPermission()
+        val hasBodySensors = checkBodySensorsPermission()
+        val hasNotification = checkNotificationPermission()
+        
+        if (!hasActivityRecognition) {
+            Log.w("StepCounter", "❌ ACTIVITY_RECOGNITION 권한이 없음 - 권한 요청")
             requestPermission()
+        } else if (!hasBodySensors) {
+            Log.w("StepCounter", "❌ BODY_SENSORS 권한이 없음 - 권한 요청")
+            requestBodySensorsPermission()
+        } else if (!hasNotification) {
+            Log.w("StepCounter", "❌ 알림 권한이 없음 - 권한 요청")
+            requestNotificationPermission()
         } else {
-            Log.d("StepCounter", "✅ 권한 있음 - 데이터 로드 시작")
+            Log.d("StepCounter", "✅ 모든 권한 있음 - 데이터 로드 시작")
             
             // DB에서 오늘 걸음수 로드
             todaySteps = repository.getTodaySteps()
@@ -130,6 +203,18 @@ fun StepCounterApp(
             // 최근 7일 데이터 로드
             recentData = repository.getRecentSteps(7)
             Log.d("StepCounter", "📊 최근 7일 데이터 로드: ${recentData.size}건")
+            
+            // Foreground Service 자동 시작
+            Log.d("StepCounter", "🚀 Foreground Service 자동 시작")
+            startService()
+        }
+    }
+    
+    // 권한이 승인되면 서비스 시작
+    LaunchedEffect(checkPermission(), checkBodySensorsPermission(), checkNotificationPermission()) {
+        if (checkPermission() && checkBodySensorsPermission() && checkNotificationPermission()) {
+            Log.d("StepCounter", "🚀 모든 권한 승인됨 - Foreground Service 시작")
+            startService()
         }
     }
 
@@ -318,6 +403,46 @@ fun StepCounterApp(
                         fontWeight = FontWeight.Bold
                     )
                 }
+            }
+        }
+        
+        // 서비스 상태 정보
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "🔔 Foreground Service 상태",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                
+                Text(
+                    text = "✅ 서비스가 자동으로 실행 중입니다.\n알림센터에서 걸음 수 측정 상태를 확인할 수 있습니다.",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                // 서비스 중지 버튼 (선택사항)
+                Button(
+                    onClick = { stopService() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Text("서비스 중지 (선택사항)")
+                }
+                
+                Text(
+                    text = "💡 서비스를 중지하면 백그라운드에서 걸음 수 측정이 중단됩니다.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
         
